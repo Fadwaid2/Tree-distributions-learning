@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tree_learning.learners.Chow_Liu import Chow_Liu
 from tree_learning.learners.RWM import RWM
+from tree_learning.learners.RWM-Wilson import RWM_Wilson
 from tree_learning.learners.OFDE import OFDE
 from tree_learning.utils.data import generate_synthetic_data, conditional_distributions_set
 from tree_learning.utils.metrics import *
@@ -30,6 +31,8 @@ def main(args):
     # Initialize the learning algorithm 
     if args.method == 'RWM':
         learner = RWM(data=train_data, k=args.k, epsilon=args.epsilon)
+    elif args.method == 'RWM_Wilson':
+        learner = RWM_Wilson(data=train_data, k=args.k, epsilon=args.epsilon)
     elif args.method == 'OFDE':
         learner = OFDE(data=train_data, k=args.k)
     elif args.method == 'Chow-Liu':
@@ -41,10 +44,10 @@ def main(args):
             'shd': shd(graph, cl_structure)
         }
     else:
-        raise ValueError("Unsupported method. Choose from: RWM, OFDE, Chow-Liu.")
+        raise ValueError("Unsupported method. Choose from: RWM, OFDE, Chow-Liu, RWM_Wilson.")
 
 
-    if args.method in ['RWM', 'OFDE']:
+    if args.method in ['RWM', 'OFDE', 'RWM_Wilson']:
         # Initialize weight matrix 
         w = np.ones((args.n, args.n), dtype=np.float64)
         np.fill_diagonal(w, 0)
@@ -96,7 +99,7 @@ if __name__ == '__main__':
 
     # Algorithms 
     algorithm = parser.add_argument_group('Method')
-    algorithm.add_argument('--method', type=str, choices=['Chow-Liu', 'RWM', 'OFDE'], required=True, help='Algorithm to learn the tree distribution')
+    algorithm.add_argument('--method', type=str, choices=['Chow-Liu', 'RWM', 'OFDE', 'RWM_Wilson'], required=True, help='Algorithm to learn the tree distribution')
     algorithm.add_argument('--epsilon', type=float, default=0.9, help='Epsilon value for RWM algorithm')
 
     args = parser.parse_args()
