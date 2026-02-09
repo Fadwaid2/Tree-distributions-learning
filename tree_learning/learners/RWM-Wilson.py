@@ -6,10 +6,10 @@ from tree_learning.utils.utils import refresh_dpt
 
 from .base import TreeLearner
 
-class RWM(TreeLearner):
+class RWM_Wilson(TreeLearner):
 
     def __init__(self, data, k, epsilon=0.9):
-        super(RWM, self).__init__(data=data, k=k)
+        super(RWM_Wilson, self).__init__(data=data, k=k)
        
         self.eta = np.sqrt(8*(self.n-2)*np.log(self.n)/self.T)
         self.epsilon = epsilon
