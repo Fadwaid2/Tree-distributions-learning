@@ -1,0 +1,7 @@
+baycomp==1.0.3
+networkx==3.1
+numba==0.58.0
+numpy==1.23.5
+pandas==1.5.1
+scikit_learn==1.1.3
+
