@@ -18,8 +18,8 @@ It also includes an implementation of the classic Chow-Liu algorithm and evaluat
 
 Each algorithm has two versions: a standard version for synthetic/small datasets and a fast vectorized version for large real-world datasets.
 
-| `--method` | Description | 
-|---|---|---|
+| `--method` | Description |
+|---|---|
 | `Chow-Liu` | Offline maximum-weight spanning tree via mutual information (Kruskal, descending sort) | 
 | `OFDE` | Online Forest Density Estimation. FPL + Kruskal (ascending/argmin) + iterative swap rounding. Precomputes cumulative counts and phi for all T steps. |
 | `OFDEFast` | Same algorithm as OFDE but with incremental vectorized phi. | 
