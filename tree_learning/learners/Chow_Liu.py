@@ -35,8 +35,8 @@ class Chow_Liu(TreeLearner):
         return w
 
     def learn_structure(self, w):
-        structure = kruskal_algo(w)
-        return structure 
+        structure = kruskal_algo(w, reverse=True)
+        return structure
 
     def update_weight_matrix(self, w, structure, precomputed, **kwargs):
         # Dummy/no-op implementation since Chow-Liu is an offline algorithm and doesnt need updates 

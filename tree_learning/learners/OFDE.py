@@ -1,185 +1,266 @@
 import numpy as np
 import random
 
-from collections import Counter
-
-from tree_learning.utils.structure import kruskal_algo
+from tree_learning.utils.structure import kruskal_algo, rounding, rounding_vectorized, kruskal_mst
 from .base import TreeLearner
 
+
+######################################################
+###### Shared helpers
+######################################################
+
+def _precompute_cumulative_counts(data, m):
+    """
+    Precompute cumulative occurrence counts for single variables and pairs.
+
+    count_1var[i][u, t] = number of times variable i took value u in x^1,...,x^t
+    count_2var[(i,j)][u, v, t] = number of times (i,j) took (u,v) in x^1,...,x^t
+
+    Index t=0 means zero observations (counts are all 0).
+    """
+    T = len(data)
+    n = data.shape[1]
+
+    count_1var = {}
+    for i in range(n):
+        counts = np.zeros((m, T + 1))
+        for t in range(T):
+            counts[:, t + 1] = counts[:, t]
+            val = int(data.iloc[t, i])
+            if 0 <= val < m:
+                counts[val, t + 1] += 1
+        count_1var[i] = counts
+
+    count_2var = {}
+    for i in range(n):
+        for j in range(i + 1, n):
+            counts = np.zeros((m, m, T + 1))
+            for t in range(T):
+                counts[:, :, t + 1] = counts[:, :, t]
+                val_i = int(data.iloc[t, i])
+                val_j = int(data.iloc[t, j])
+                if 0 <= val_i < m and 0 <= val_j < m:
+                    counts[val_i, val_j, t + 1] += 1
+            count_2var[(i, j)] = counts
+
+    return count_1var, count_2var
+
+
+def _precompute_phi(data, count_1var, count_2var, m):
+    """
+    Precompute cumulative phi for all edges across all time steps.
+
+    At time tau (1-indexed), phi^tau_ij uses theta^tau which has counts
+    from the first tau-1 observations:
+        theta_i^tau(u)    = (count_1var[i][u, tau-1] + 1/2) / ((tau-1) + m/2)
+        theta_ij^tau(u,v) = (count_2var[(i,j)][u,v, tau-1] + 1/2) / ((tau-1) + m^2/2)
+
+    phi = log(theta_i * theta_j / theta_ij)  (log-loss decomposition)
+
+    Returns cumulative sums: precomputed_phi[(i,j)][t-1] = sum_{tau=1}^{t} phi^tau
+    (matching Algorithm 1, Step 10).
+    """
+    T = len(data)
+    n = data.shape[1]
+    precomputed_phi = {}
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            cumulative = 0.0
+            cum_list = []
+            for t in range(T):
+                val_i = int(data.iloc[t, i])
+                val_j = int(data.iloc[t, j])
+
+                cnt_i  = count_1var[i][val_i, t]
+                cnt_j  = count_1var[j][val_j, t]
+                cnt_ij = count_2var[(i, j)][val_i, val_j, t]
+
+                theta_i  = (cnt_i  + 0.5) / (t + m / 2)
+                theta_j  = (cnt_j  + 0.5) / (t + m / 2)
+                theta_ij = (cnt_ij + 0.5) / (t + m ** 2 / 2)
+
+                ratio = theta_i * theta_j / theta_ij
+                phi = np.log(max(ratio, 1e-300))
+
+                cumulative += phi
+                cum_list.append(cumulative)
+
+            precomputed_phi[(i, j)] = cum_list
+
+    return precomputed_phi
+
+
+
+
+
+######################################################
+###### Version 1: OFDE — for synthetic data
+######################################################
+
 class OFDE(TreeLearner):
+    """
+    Online Forest Density Estimation for synthetic data.
+
+    Precomputes cumulative counts and cumulative phi for all time steps,
+    then runs FPL + Kruskal (ascending/argmin) + iterative swap rounding.
+    """
 
     def __init__(self, data, k):
         super(OFDE, self).__init__(data=data, k=k)
-
-        #initialize vector p for OFDE
-        self.p = np.zeros(self.n*(self.n-1)//2)
-
-    def conditional_distributions_set(self, no_parent=False):
-        """
-        Getting all the occurrences for all the sets of parents-children for all the possible edges in a graph
-        """
-        self.data.columns = list(range(self.n))
-        variables = list(range(self.n)) 
-        cond_pmf_values = {}
-        for v in variables:
-            if no_parent: # v is a root node 
-                joint_states = self.data.groupby([v] , observed=True).size().fillna(0)
-                cond_pmf_values[(v)] = joint_states 
-            else: 
-                parents = list(variables)
-                parents.remove(v) #possible parents
-                for p in parents:
-                    #calculate joint P(node1 and node2)
-                    joint_states = self.data.groupby([v] + [p], observed=True).size().unstack(p).fillna(0)
-                    cond_pmf_values[(v, p)] = joint_states # conditional proba P(Xi = xi|Xj = xj)
-        return cond_pmf_values
+        self.p = np.zeros(self.n * (self.n - 1) // 2)
+        self.precomputed_phi = None
+        self._w_fpl = None
 
     def precompute_conditional_distributions(self):
-        cond_probas = self.conditional_distributions_set(no_parent=False)
-        cond_proba_one_var = self.conditional_distributions_set(no_parent=True)
-        return {
-            "cond_probas": cond_probas,
-            "cond_proba_one_var": cond_proba_one_var
-        }
-
-    def edge_cond_proba_dict(self, edge, Ne, time_step, one_var=False):
-        """
-        Retrieves the occurrence of a certain edge from the total previous dict containing all edges
-        """
-        if one_var: 
-            proba_dict = {key:1/self.k for key in [i for i in range(self.k)]} # 1 variable 
-        else: 
-            keys = [(i, j) for i in range(self.k) for j in range(self.k)]
-            proba_dict = {key: 1 / self.k**2 for key in keys} # 2 vars 
-
-        for x, val in Ne.items():
-            if x==edge:
-                df = Ne[x]
-                for row in df.index:
-                    if one_var: 
-                        proba_dict[row]= ((df.at[row]+1/2)/(time_step+self.k/2))
-                    else:
-                        for col in df.columns: 
-                            proba_dict[(row, col)]= ((df.at[row, col]+1/2)/(time_step+(self.k**2)/2)) 
-        return proba_dict
-
-
-    def get_weight_phi(self, p, c, precomputed_cond_probas, precomputed_cond_proba_1_var, t):
-        """
-        Compute weight phi, see fromula 5 in  https://www.auai.org/uai2016/proceedings/papers/116.pdf
-        """
-        value_i = self.data.iloc[t,p]
-        value_j = self.data.iloc[t,c]
-        two_d_marginal = self.edge_cond_proba_dict((p,c), precomputed_cond_probas, t+1) 
-        one_d_p = self.edge_cond_proba_dict(p, precomputed_cond_proba_1_var, t+1, one_var=True) 
-        one_d_c = self.edge_cond_proba_dict(c, precomputed_cond_proba_1_var, t+1, one_var=True)
-
-        #Filter out unnecessary values and only keep those in dataset : phi calculation are only done for relevant values 
-        theta_i = one_d_p[value_i]
-        theta_j = one_d_c[value_j]
-        theta_ij = two_d_marginal[(value_i,value_j)]
-        return theta_i * theta_j / theta_ij if theta_ij > 0 else 0
+        count_1var, count_2var = _precompute_cumulative_counts(self.data, self.k)
+        phi = _precompute_phi(self.data, count_1var, count_2var, self.k)
+        self.precomputed_phi = phi
+        return {"precomputed_phi": phi}
 
     def learn_weights(self, precomputed):
-        precomputed_phi = {}
-        precomputed_cond_probas = precomputed['cond_probas']
-        precomputed_cond_proba_1_var = precomputed['cond_proba_one_var']
-
-        for i in range(self.n):
-            for j in range(i+1, self.n):
-                #for each (parent,child) we have a list of probabilities across all time steps 
-                dpt_list = []
-                for t in range(self.T):
-                    phi_time_t = self.get_weight_phi(i, j, precomputed_cond_probas, precomputed_cond_proba_1_var, t)
-                    dpt_list.append(phi_time_t)
-                precomputed_phi[(i,j)] = dpt_list
-        return precomputed_phi
-
-    def update_weight_matrix(self, w, structure, precomputed_phi, **kwargs):
-        """
-        Updates the weight matrix using Follow-the-Perturbed-Leader (FPL) algorithm 
-            w: weight matrix to update with FPL
-            structure (list of edges) from Kruskal's algorithm    
-        """
-        t = self.current_time
-        #horizon independent case parameter (see paper) 
-        beta = (1/self.n)*np.sqrt(2/t) 
-        for edge in structure: 
-            i, j = edge[0], edge[1]
-            perturbation = random.uniform(0, 1/beta)
-            phi_i_j = precomputed_phi[(i,j)][t-1]   
-            w[i][j] = perturbation + phi_i_j
-            w[j][i] = w[i][j] 
-        return w
+        return precomputed["precomputed_phi"]
 
     def learn_structure(self, w, **kwargs):
-        """
-        Calling Kruskal's algorithm and update p via swap rounding.
-        """
-        structure = kruskal_algo(w)
-        p_intermediate = self.generate_p_vector(structure)
-        self.p = self.rounding(p_intermediate)
-        return structure 
+        t = self.current_time
+        n = self.n
 
+        # Follow Perturbed Leader: update all edges (not just tree edges)
+        beta = (1.0 / n) * np.sqrt(2.0 / t)
+        w_new = w.copy()
+        for i in range(n):
+            for j in range(i + 1, n):
+                perturbation = random.uniform(0, 1.0 / beta)
+                phi_cumulative = self.precomputed_phi[(i, j)][t - 1]
+                w_new[i][j] = perturbation + phi_cumulative
+                w_new[j][i] = w_new[i][j]
+        self._w_fpl = w_new
 
-    def generate_p_vector(self, f):
-        """
-        Generate p vector for Swap rounding method to project on matroid 
-            p: a numpy array with unique non-zero edges
-            obtained from the previous time step  
-            f: the structure edges outputed by Kruskal's algorithm 
-            alpha: the mixing variable
-        """
-        alpha = 1/(4*np.sqrt(2*self.current_time))
+        # Kruskal (ascending = argmin, correct for OFDE)
+        structure = kruskal_algo(w_new)
+
+        # Iterative swap rounding
+        alpha = 1.0 / (4.0 * np.sqrt(2.0 * t))
+        p_intermediate = self._generate_p_vector(structure, alpha)
+        self.p = rounding(p_intermediate)
+
+        return structure
+
+    def update_weight_matrix(self, w, structure, precomputed_phi, **kwargs):
+        return self._w_fpl
+
+    def _generate_p_vector(self, f, alpha):
+        """p^{t+1/2} = alpha * p^t + (1 - alpha) * f^{t+1/2}"""
+        edge_set = set(f)
         f_array = []
-        edge_set = set(f) #make sure there are no repeated edges in the list 
-
         for i in range(self.n):
-            for j in range(i+1,self.n):
-                if (i, j) in edge_set:
-                    f_array.append(1)  #when edge exists
-                else:
-                    f_array.append(0)  #no edge  
+            for j in range(i + 1, self.n):
+                f_array.append(1 if (i, j) in edge_set else 0)
         f_array = np.array(f_array)
-        return alpha*self.p +(1-alpha)*f_array
-
-    @staticmethod
-    def rounding(x):
-        """
-        Swap rounding method to project on matroid 
-        Input: 
-            x: this will be the fractional point aka the weight that FPL gave as output 
-        """
-        x = x.copy()
-        length = len(x)-1
-        
-        # Arbitrarely select two components in the convex combination i and j 
-        # with condition: i should be different from j 
-        while True:
-            i = random.randint(0, length)
-            j = random.randint(0, length)
-            if i != j:
-                break
-        
-        if x[i] == 0 and x[j] == 0: #if so select a new index i 
-            i = random.randint(0,length)
-        elif x[i] + x[j] <= 1:
-            if np.random.rand() < x[i] / (x[i] + x[j]):
-                x[i], x[j] = x[i] + x[j], 0
-            else:
-                x[i], x[j] = 0, x[i] + x[j]
-        else:
-            denom = 2 - x[i] - x[j]
-            if denom <= 1e-8: #ensure denominator is valid 
-                if np.random.rand() < 0.5:
-                    x[i], x[j] = 1, x[i] + x[j] - 1
-                else:
-                    x[i], x[j] = x[i] + x[j] - 1, 1
-            else: 
-                if np.random.rand() < (1 - x[j]) /denom:
-                    x[i], x[j] = 1, x[i] + x[j] - 1
-                else:
-                    x[i], x[j] = x[i] + x[j] - 1, 1         
-        return x 
+        return alpha * self.p + (1 - alpha) * f_array
 
 
+######################################################
+###### Version 2: OFDEFast — vectorized for real data
+######################################################
+
+
+
+class OFDEFast(TreeLearner):
+    """
+    Vectorized Online Forest Density Estimation for large real-world datasets.
+
+    Incremental phi computation — no O(n^2 * T) precomputation array.
+    Memory: O(n*m + n_edges*m^2) vs O(n^2 * T) in OFDE.
+    Much faster on large datasets.
+
+    """
+
+    def __init__(self, data, k):
+        super(OFDEFast, self).__init__(data=data, k=k)
+        n = self.n
+        m = self.k
+        n_edges = n * (n - 1) // 2
+
+        triu_i, triu_j = np.triu_indices(n, k=1)
+        self.triu_i = triu_i.astype(np.intp)
+        self.triu_j = triu_j.astype(np.intp)
+        self.arange_n = np.arange(n, dtype=np.intp)
+        self.arange_edges = np.arange(n_edges, dtype=np.intp)
+
+        self.running_cnt_1var = np.zeros((n, m), dtype=np.float64)
+        self.running_cnt_2var = np.zeros((n_edges, m * m), dtype=np.float64)
+        self.phi_cumulative = np.zeros(n_edges, dtype=np.float64)
+        self.p = np.zeros(n_edges, dtype=np.float64)
+
+        self._w_upper = None
+        self._data_array = data.values.astype(np.int32)
+
+    def precompute_conditional_distributions(self):
+        # Incremental version needs no precomputation
+        return {}
+
+    def learn_weights(self, precomputed):
+        return {}
+
+    def learn_structure(self, w, **kwargs):
+        t_idx = self.current_time - 1  # 0-indexed
+        t = self.current_time          # 1-indexed
+        m = self.k
+        n = self.n
+        triu_i = self.triu_i
+        triu_j = self.triu_j
+
+        # Current observation
+        obs = self._data_array[t_idx]
+        vals_i = obs[triu_i]
+        vals_j = obs[triu_j]
+
+        # Counts from first t_idx observations (before current obs)
+        cnt_i  = self.running_cnt_1var[triu_i, vals_i]
+        cnt_j  = self.running_cnt_1var[triu_j, vals_j]
+        cell   = vals_i * m + vals_j
+        cnt_ij = self.running_cnt_2var[self.arange_edges, cell]
+
+        # Theta 
+        denom_1var = t_idx + m / 2.0
+        denom_2var = t_idx + m ** 2 / 2.0
+        theta_i  = (cnt_i  + 0.5) / denom_1var
+        theta_j  = (cnt_j  + 0.5) / denom_1var
+        theta_ij = (cnt_ij + 0.5) / denom_2var
+
+        # Phi = log(theta_i * theta_j / theta_ij) and accumulate
+        ratio = theta_i * theta_j / theta_ij
+        self.phi_cumulative += np.log(np.maximum(ratio, 1e-300))
+
+        # Update running counts with current observation
+        self.running_cnt_1var[self.arange_n, obs] += 1
+        self.running_cnt_2var[self.arange_edges, cell] += 1
+
+        # Follow Perturbed Leader (vectorized)
+        beta = (1.0 / n) * np.sqrt(2.0 / t)
+        perturbation = np.random.uniform(0, 1.0 / beta, size=len(triu_i))
+        w_upper = perturbation + self.phi_cumulative
+        self._w_upper = w_upper
+
+        # Kruskal MST (ascending = argmin, correct for OFDE)
+        f = kruskal_mst(w_upper, triu_i, triu_j, n)
+
+        # Iterative swap rounding
+        alpha = 1.0 / (4.0 * np.sqrt(2.0 * t))
+        f_array = f[triu_i, triu_j]
+        p_intermediate = alpha * self.p + (1.0 - alpha) * f_array
+        self.p = rounding_vectorized(p_intermediate)
+
+        # Return edge list (compatible with run.py: log_likelihood, shd)
+        rows, cols = np.where(f > 0)
+        structure = [(int(r), int(c)) for r, c in zip(rows, cols) if r < c]
+        return structure
+
+    def update_weight_matrix(self, w, structure, precomputed, **kwargs):
+        n = self.n
+        w_new = np.zeros((n, n), dtype=np.float64)
+        if self._w_upper is not None:
+            w_new[self.triu_i, self.triu_j] = self._w_upper
+            w_new[self.triu_j, self.triu_i] = self._w_upper
+        return w_new

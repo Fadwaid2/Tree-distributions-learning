@@ -7,9 +7,9 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 from tree_learning.learners.Chow_Liu import Chow_Liu
-from tree_learning.learners.RWM import RWM
-from tree_learning.learners.RWM-Wilson import RWM_Wilson
-from tree_learning.learners.OFDE import OFDE
+from tree_learning.learners.RWM import RWM, RWMFast
+from tree_learning.learners.RWM_Wilson import RWM_Wilson, RWM_WilsonFast
+from tree_learning.learners.OFDE import OFDE, OFDEFast
 from tree_learning.utils.data import generate_synthetic_data, conditional_distributions_set
 from tree_learning.utils.metrics import *
 
@@ -17,7 +17,7 @@ def main(args):
     # Either generate synthetic data or directly load available dataset  
     if args.synthetic:
         print(f"Generating synthetic data with {args.n} nodes, {args.T} samples and alphabet size {args.k}")
-        train_data, test_data, graph = generate_synthetic_data(args.n, args.T, args.k, args.seed, args.tree, args.noise)
+        train_data, test_data, graph = generate_synthetic_data(args.n, args.T, args.k, args.tree, args.seed, noise=args.noise)
     else:
         print(f"Reading train data from {args.train_data}")
         train_data = pd.read_csv(args.train_data, index_col=0)
@@ -31,10 +31,16 @@ def main(args):
     # Initialize the learning algorithm 
     if args.method == 'RWM':
         learner = RWM(data=train_data, k=args.k, epsilon=args.epsilon)
+    elif args.method == 'RWMFast':
+        learner = RWMFast(data=train_data, k=args.k, epsilon=args.epsilon)
     elif args.method == 'RWM_Wilson':
         learner = RWM_Wilson(data=train_data, k=args.k, epsilon=args.epsilon)
+    elif args.method == 'RWM_WilsonFast':
+        learner = RWM_WilsonFast(data=train_data, k=args.k, epsilon=args.epsilon)
     elif args.method == 'OFDE':
         learner = OFDE(data=train_data, k=args.k)
+    elif args.method == 'OFDEFast':
+        learner = OFDEFast(data=train_data, k=args.k)
     elif args.method == 'Chow-Liu':
         # Chow-Liu is an offline method so get results direclty here 
         learner = Chow_Liu(data=train_data, k=args.k)
@@ -44,10 +50,10 @@ def main(args):
             'shd': shd(graph, cl_structure)
         }
     else:
-        raise ValueError("Unsupported method. Choose from: RWM, OFDE, Chow-Liu, RWM_Wilson.")
+        raise ValueError("Unsupported method. Choose from: Chow-Liu, RWM, RWMFast, OFDE, OFDEFast, RWM_Wilson, RWM_WilsonFast.")
 
 
-    if args.method in ['RWM', 'OFDE', 'RWM_Wilson']:
+    if args.method in ['RWM', 'RWMFast', 'OFDE', 'OFDEFast', 'RWM_Wilson', 'RWM_WilsonFast']:
         # Initialize weight matrix 
         w = np.ones((args.n, args.n), dtype=np.float64)
         np.fill_diagonal(w, 0)
@@ -88,18 +94,18 @@ if __name__ == '__main__':
     parser.add_argument('--train_data', type=Path, help='Path to the training dataset (CSV)')
     parser.add_argument('--test_data', type=Path, help='Path to the testing dataset (CSV)')
     parser.add_argument('--true_graph', type=Path, help='Path to the true graph list of edges (.txt file)')
-    parser.add_argument('--synthetic', type=bool, help='Flag to generate synthetic data instead of loading')
+    parser.add_argument('--synthetic', action='store_true', help='Flag to generate synthetic data instead of loading')
     parser.add_argument('--output_folder', type=Path, required=True, help='Directory to save results and arguments')
     parser.add_argument('--n', type=int, required=True, help='Number of nodes (variables) in the distribution')
     parser.add_argument('--T', type=int, default=10, help='Number of time steps for online learning')
     parser.add_argument('--k', type=int, default=2, help='Alphabet size (values taken by the variables)')
-    parser.add_argument('--tree', type=bool, help='Flag to generate synthetic data from tree')
+    parser.add_argument('--tree', action='store_true', help='Flag to generate synthetic data from tree')
     parser.add_argument('--seed', type=int, default=22, help='Random seed for synthetic data')
     parser.add_argument('--noise', type=float, default=0.5, help='Noise for synthetic data')
 
     # Algorithms 
     algorithm = parser.add_argument_group('Method')
-    algorithm.add_argument('--method', type=str, choices=['Chow-Liu', 'RWM', 'OFDE', 'RWM_Wilson'], required=True, help='Algorithm to learn the tree distribution')
+    algorithm.add_argument('--method', type=str, choices=['Chow-Liu', 'RWM', 'RWMFast', 'OFDE', 'OFDEFast', 'RWM_Wilson', 'RWM_WilsonFast'], required=True, help='Algorithm to learn the tree distribution')
     algorithm.add_argument('--epsilon', type=float, default=0.9, help='Epsilon value for RWM algorithm')
 
     args = parser.parse_args()
